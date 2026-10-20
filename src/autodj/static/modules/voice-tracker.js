@@ -74,12 +74,8 @@ export function microphoneProblem(error) {
   }
 }
 
-// The longest take the browser records.  Booking decodes the whole take
-// in the page (decodeAudioData has no streaming form), so the length is
-// what bounds the page's memory: three minutes of stereo at 44.1 kHz is
-// about 64 MB decoded, plus 16 MB of WAV.  The station's own limit
-// applies too, when it is shorter.
-export const BROWSER_MAX_SECONDS = 180;
+// Booking decodes the take in the page (decodeAudioData has no streaming form).
+export const BROWSER_MAX_SECONDS = 600;
 // Frames converted between pauses that let the page handle input.
 const WAV_BLOCK_FRAMES = 44100 * 10;
 
@@ -104,13 +100,13 @@ function wavHeader(view, frames, rate) {
 
 // Frames *from* to *to* of *channels*, averaged to one, as 16-bit samples
 // straight into the WAV: no mono copy of the take is made.
-function writeFrames(view, channels, from, to) {
+function writeFrames(view, channels, from, to, offset = WAV_HEADER_BYTES) {
   for (let i = from; i < to; i += 1) {
     let sum = 0;
     for (const channel of channels) sum += channel[i];
     const value = sum / channels.length;
     const sample = Math.max(-1, Math.min(1, Number.isFinite(value) ? value : 0));
-    view.setInt16(WAV_HEADER_BYTES + i * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+    view.setInt16(offset + (i - from) * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
   }
 }
 
@@ -130,19 +126,23 @@ export function encodeWav(channels, rate) {
 // the channels are then averaged into the WAV ten seconds at a time,
 // with a pause between blocks so the page stays responsive.
 export async function recordingToWav(
-  blob, rate, Context = globalThis.OfflineAudioContext, pause = () => new Promise((resolve) => setTimeout(resolve, 0)),
+  blob, rate, Context = globalThis.OfflineAudioContext,
+  pause = () => new Promise((resolve) => setTimeout(resolve, 0)),
 ) {
   const audio = await new Context(1, 1, rate).decodeAudioData(await blob.arrayBuffer());
   const channels = Array.from({ length: audio.numberOfChannels }, (_, i) => audio.getChannelData(i));
   const frames = audio.length;
-  const buffer = new ArrayBuffer(WAV_HEADER_BYTES + frames * 2);
-  const view = new DataView(buffer);
-  wavHeader(view, frames, audio.sampleRate);
+  const header = new ArrayBuffer(WAV_HEADER_BYTES);
+  wavHeader(new DataView(header), frames, audio.sampleRate);
+  const parts = [header];
   for (let from = 0; from < frames; from += WAV_BLOCK_FRAMES) {
-    writeFrames(view, channels, from, Math.min(frames, from + WAV_BLOCK_FRAMES));
+    const to = Math.min(frames, from + WAV_BLOCK_FRAMES);
+    const block = new ArrayBuffer((to - from) * 2);
+    writeFrames(new DataView(block), channels, from, to, 0);
+    parts.push(new Blob([block]));
     if (from + WAV_BLOCK_FRAMES < frames) await pause();
   }
-  return new Blob([buffer], { type: "audio/wav" });
+  return new Blob(parts, { type: "audio/wav" });
 }
 
 // *text* as a sentence: the server's reasons have no full stop.
@@ -234,6 +234,7 @@ export function installVoiceTracker(root = document.getElementById("voice-tracke
   let session = null;
   let starting = false;
   let generation = 0;
+  let bookingAbort = null;
   let linked = null;
   let wasShown = false;
   const rows = new Map();
@@ -724,14 +725,18 @@ export function installVoiceTracker(root = document.getElementById("voice-tracke
     }
     const slot = target(open);
     if (!slot) return;
+    const asked = generation;
+    const sourceTake = take;
     await withDisabled(button, async () => {
       let wav;
       try {
         wav = await toWav(take.blob, rate());
       } catch (_) {
+        if (asked !== generation) return;
         fail(bookButton, "This browser could not read the recording back. Record it again.");
         return;
       }
+      if (asked !== generation || take !== sourceTake) return;
       if (wav.size + FORM_BYTES > data.limits.max_bytes) {
         fail(bookButton, "The recording is too large for this station. Record a shorter one.");
         return;
@@ -744,9 +749,15 @@ export function installVoiceTracker(root = document.getElementById("voice-tracke
       form.append("allow_outro", allowOutro.checked ? "true" : "false");
       form.append("file", new File([wav], "voice-track.wav", { type: "audio/wav" }));
       let booked;
+      const controller = new AbortController();
+      bookingAbort = controller;
       try {
-        booked = await requestJson("/api/voice-tracks", { method: "POST", body: form });
+        booked = await requestJson("/api/voice-tracks", {
+          method: "POST", body: form, signal: controller.signal,
+        });
       } catch (problem) {
+        if (bookingAbort === controller) bookingAbort = null;
+        if (asked !== generation) return;
         if (problem.status === 409) await refresh();
         const latest = data?.slot;
         if (problem.status === 409 && take && latest && latest.slot_id !== slot.slot_id) {
@@ -756,6 +767,8 @@ export function installVoiceTracker(root = document.getElementById("voice-tracke
         }
         return;
       }
+      if (bookingAbort === controller) bookingAbort = null;
+      if (asked !== generation || take !== sourceTake) return;
       dropTake();
       await refresh();
       renderTimer();
@@ -825,6 +838,8 @@ export function installVoiceTracker(root = document.getElementById("voice-tracke
     clear() {
       requestEpoch += 1;
       generation += 1;
+      bookingAbort?.abort();
+      bookingAbort = null;
       if (session) {
         session.cancelled = true;
         stop();
