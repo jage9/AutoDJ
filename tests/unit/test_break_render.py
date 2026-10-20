@@ -23,6 +23,7 @@ from autodj.breaks import (
     RENDERED,
     VOICE_TRACK,
     BreakError,
+    TransitionItem,
     new_id,
 )
 from autodj.stereo import SAMPLE_RATE as SR
@@ -117,6 +118,52 @@ def test_hard_boundary_window_includes_a_planned_liner_before_voice(station):
     liner_points = player.saved_points(liner)
     liner_s = liner_points["end"] - liner_points["start"]
     assert windows[0] == pytest.approx((-2.0, 2.0 + liner_s + item.cues.end - item.cues.start))
+
+
+@pytest.mark.parametrize("source", ["queued", "automatic"])
+@pytest.mark.parametrize("action", ["replace", "before", "after"])
+def test_custom_transition_order_is_used_by_the_live_render(station, source, action):
+    player, (a, b, liner, _d), _points, desk = station
+    item = make_break(desk, "slot", seconds=2.0)
+    desk.add(item)
+    (taken,) = desk.take(item.slot_id, 0.0)
+    liner_item = TransitionItem(f"{source}-liner", "liner", source, "Station ID", entry=liner)
+    break_item = TransitionItem(
+        f"break:{item.break_id}",
+        "booked_voice",
+        "voice_track",
+        "Announcer",
+        committed=True,
+        editable=False,
+    )
+    if action == "replace":
+        order = (break_item.item_id,)
+        liners = ()
+    elif action == "before":
+        order = (break_item.item_id, liner_item.item_id)
+        liners = ((liner, source == "queued"),)
+    else:
+        order = (liner_item.item_id, break_item.item_id)
+        liners = ((liner, source == "queued"),)
+
+    render = player._render_track(
+        a,
+        b,
+        0,
+        liners=liners,
+        breaks=(taken,),
+        transition_order=order,
+        transition_items=(liner_item, break_item),
+    )
+
+    assert len(render.break_events) == 1
+    if action == "replace":
+        assert render.liner_events == ()
+    else:
+        assert len(render.liner_events) == 1
+        liner_frame = render.liner_events[0][0]
+        break_frame = render.break_events[0][0]
+        assert (break_frame < liner_frame) is (action == "before")
 
 
 def test_standalone_lets_the_next_song_in_when_the_speech_ends(station):
