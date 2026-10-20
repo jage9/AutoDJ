@@ -423,6 +423,7 @@ describe("voice tracker", () => {
     await press("vt-record");
     await press("vt-record");
     await flush();
+    select = byId("vt-transition-items").querySelector("select");
     const forecastRequest = () => prepared.server.calls.filter((call) => call.method === "GET").at(-1).url;
     expect(forecastRequest()).toContain("transition_revision=revision-1");
     expect(decodeURIComponent(forecastRequest())).toContain(
