@@ -180,7 +180,7 @@ function tracker(over = {}) {
     revokeUrl: vi.fn(),
     storage,
     ...options,
-    media: over.media ? () => over.media(mic) : () => mic,
+    media: options.media ? () => options.media(mic) : () => mic,
   });
   const advance = async (seconds) => {
     for (let i = 0; i < seconds; i += 1) {

@@ -1120,9 +1120,11 @@ export function installVoiceTracker(root = document.getElementById("voice-tracke
         wav = recorded.wav;
         if (!wav) throw new Error("Recording preparation failed");
       } catch (_) {
+        if (asked !== generation) return;
         fail(bookButton, "This browser could not read the recording back. Record it again.");
         return;
       }
+      if (asked !== generation || take !== recorded) return;
       if (wav.size + FORM_BYTES > data.limits.max_bytes) {
         fail(bookButton, "The recording is too large for this station. Record a shorter one.");
         return;
@@ -1158,6 +1160,7 @@ export function installVoiceTracker(root = document.getElementById("voice-tracke
         }
         return;
       }
+      if (asked !== generation || take !== recorded) return;
       dropTake();
       await refresh();
       renderTimer();

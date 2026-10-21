@@ -172,17 +172,17 @@ A stale plan is also refused; refresh the list and submit your choice against th
 
 The recording state is said once when recording starts and stops, then once a minute, and 30
 seconds before the length limit or before the song change closes. Recording stops by itself at
-10 minutes. Manual voice tracks have their own 600-second limit and 64 MiB WAV upload allowance;
-the announcer program still uses `max_seconds` and `max_upload_mb`. The station's shared
-`max_queued`, `max_per_slot` and `quota_mb` still apply to both. Recording also stops, keeping the
-take and letting the microphone go, when you leave the Voice tracks tab or the page is hidden
-(another browser tab, a minimised window); that is said once.
+10 minutes or sooner if the station's upload and storage limits cannot hold the take. Manual voice
+tracks have their own 600-second limit and 64 MiB WAV upload allowance; the announcer program still
+uses `max_seconds` and `max_upload_mb`. The station's shared `max_queued`, `max_per_slot` and
+`quota_mb` still apply to both. The browser prepares the WAV in chunks and caches it for private
+listen-back and booking.
+Recording also stops, keeping the take and letting the microphone go, when you leave the Voice
+tracks tab or the page is hidden (another browser tab, a minimised window); that is said once.
 
-A voice track cannot run across a hard scheduled event or a clockwheel restart. AutoDJ
+A standalone voice track cannot run across a hard scheduled event or a clockwheel restart. AutoDJ
 refuses it at booking when the timing is known, and checks again before rendering in case the
 schedule changed; a conflicting queued track is dropped whole rather than cut off.
-
-The browser prepares the WAV in chunks and caches it for booking.
 
 If the song change moves on before you book, the tab says which change is open now. When the open
 change has the same two songs (it was planned again), **Book voice track** books the take there.

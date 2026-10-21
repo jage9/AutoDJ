@@ -73,21 +73,6 @@ def test_talk_up_ends_the_voice_on_the_next_songs_vocal(station):
     assert desk.get(item.break_id).mixed_as == "talk_up"
 
 
-def test_hard_boundary_window_includes_a_planned_liner_before_voice(station):
-    player, (a, b, liner, _d), _points, desk = station
-    item = replace(make_break(desk, new_id(), seconds=3.0, allow_outro=True), source=VOICE_TRACK)
-    desk.add(item)
-    (taken,) = desk.take(item.slot_id, 0.0)
-    windows = []
-    player.voice_track_crosses_hard_boundary = lambda start, duration: (
-        windows.append((start, duration)) or False
-    )
-    player._render_track(a, b, 0, liners=((liner, False),), breaks=(taken,))
-    liner_points = player.saved_points(liner)
-    liner_s = liner_points["end"] - liner_points["start"]
-    assert windows[0] == pytest.approx((-2.0, 2.0 + liner_s + item.cues.end - item.cues.start))
-
-
 @pytest.mark.parametrize("source", ["queued", "automatic"])
 @pytest.mark.parametrize("action", ["replace", "before", "after"])
 def test_custom_transition_order_is_used_by_the_live_render(station, source, action):
@@ -132,6 +117,56 @@ def test_custom_transition_order_is_used_by_the_live_render(station, source, act
         liner_frame = render.liner_events[0][0]
         break_frame = render.break_events[0][0]
         assert (break_frame < liner_frame) is (action == "before")
+
+
+@pytest.mark.parametrize("placement", ["auto", "talk_up", "standalone"])
+def test_manual_voice_is_dropped_when_its_full_chain_hits_a_hard_boundary(station, placement):
+    player, (a, b, _c, _d), _points, desk = station
+    slot_id = new_id()
+    first = replace(
+        make_break(desk, slot_id, seconds=3.0, placement=placement, allow_outro=True),
+        source=VOICE_TRACK,
+    )
+    second = replace(
+        make_break(desk, slot_id, seconds=2.0, placement=placement, allow_outro=True),
+        source=VOICE_TRACK,
+    )
+    desk.add(first)
+    desk.add(second)
+    taken = tuple(desk.take(first.slot_id, 0.0))
+    windows = []
+
+    def crosses(start, duration):
+        windows.append((start, duration))
+        return True
+
+    player.voice_track_crosses_hard_boundary = crosses
+    rendered = player._render_track(a, b, 0, breaks=taken)
+    assert rendered.break_events == ()
+    assert all(desk.get(item.break_id).state == DROPPED for item in taken)
+    first_clip = first.cues.end - first.cues.start
+    second_clip = second.cues.end - second.cues.start
+    if placement == "standalone":
+        assert windows == pytest.approx([(0.0, first_clip), (first_clip, second_clip)])
+    else:
+        assert windows == pytest.approx(
+            [(-2.0, 2.0 + first_clip), (-2.0, 2.0 + first_clip + second_clip)]
+        )
+
+
+def test_hard_boundary_window_includes_a_planned_liner_before_voice(station):
+    player, (a, b, liner, _d), _points, desk = station
+    item = replace(make_break(desk, new_id(), seconds=3.0, allow_outro=True), source=VOICE_TRACK)
+    desk.add(item)
+    (taken,) = desk.take(item.slot_id, 0.0)
+    windows = []
+    player.voice_track_crosses_hard_boundary = lambda start, duration: (
+        windows.append((start, duration)) or False
+    )
+    player._render_track(a, b, 0, liners=((liner, False),), breaks=(taken,))
+    liner_points = player.saved_points(liner)
+    liner_s = liner_points["end"] - liner_points["start"]
+    assert windows[0] == pytest.approx((-2.0, 2.0 + liner_s + item.cues.end - item.cues.start))
 
 
 def test_standalone_lets_the_next_song_in_when_the_speech_ends(station):

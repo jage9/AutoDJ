@@ -105,11 +105,11 @@ ANNOUNCER_SCOPES = {ANNOUNCER_PREFIX: SCOPE_ANNOUNCER}
 UPLOAD_PATH = ANNOUNCER_PREFIX + "breaks"
 #: The voice tracker's upload route (#128), with its own body cap.
 VOICE_UPLOAD_PATH = "/api/voice-tracks"
+MAX_FORECAST_SECONDS = 600.0
 # Manual browser recordings have their own budget; announcer integrations
 # continue to use the station's configured break limits.
 VOICE_MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 VOICE_MAX_SECONDS = 600.0
-MAX_FORECAST_SECONDS = 600.0
 #: Room for the multipart framing and the form fields around the file.
 MULTIPART_OVERHEAD_BYTES = 64 * 1024
 #: Plays and queued requests the context lists.
@@ -713,18 +713,22 @@ def install_breaks(router: StationRouter) -> None:
             assert path is not None  # stored, or the request has already answered
             cues = await decode_one(path, max_seconds)
             if source == VOICE_TRACK:
-                slot = await asyncio.to_thread(_current_slot, station)
-                if slot is None or slot["slot_id"] != fields.slot_id:
-                    return refused(409, "That song change is no longer open", "slot_closed", slot)
-                if (slot["ending"] or {}).get("id") != fields.ending_id or (
-                    slot["upcoming"] or {}
+                checked_slot = await asyncio.to_thread(_current_slot, station)
+                manual_fit = fields.placement != "standalone"
+                if checked_slot is None or checked_slot["slot_id"] != fields.slot_id:
+                    return refused(
+                        409, "That song change is no longer open", "slot_closed", checked_slot
+                    )
+                if (checked_slot["ending"] or {}).get("id") != fields.ending_id or (
+                    checked_slot["upcoming"] or {}
                 ).get("id") != fields.upcoming_id:
                     return refused(
-                        409, "The songs around that song change have changed", "pair_changed", slot
+                        409,
+                        "The songs around that song change have changed",
+                        "pair_changed",
+                        checked_slot,
                     )
-            if source == VOICE_TRACK:
-                checked_slot = slot
-                manual_fit = fields.placement != "standalone"
+                slot = checked_slot
                 chain = sorted(
                     (
                         queued

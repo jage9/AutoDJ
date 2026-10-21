@@ -81,109 +81,6 @@ def test_the_tracker_shows_the_open_slot_its_placement_and_the_limits(station):
     assert named["slot"]["slot_id"] == slot["slot_id"]
 
 
-def test_manual_voice_limits_do_not_change_announcer_limits(tmp_path, monkeypatch):
-    import autodj.breaks_api as api
-    from autodj.server import _voice_upload_cap
-
-    station = Station(tmp_path, max_seconds=5.0, max_upload_mb=2)
-    limits = voice(station)["limits"]
-    assert (limits["max_bytes"], limits["max_seconds"]) == (64 * 1024 * 1024, 600.0)
-    assert _voice_upload_cap(station.app.state.stations) >= 64 * 1024 * 1024
-    checked = []
-
-    async def decode(_gate, _path, max_seconds, _decode=None):
-        checked.append(max_seconds)
-        from autodj.breaks import BreakCues
-
-        return BreakCues(0, 1, 1, 2)
-
-    monkeypatch.setattr(api, "_gated_decode", decode)
-    assert book(station).status_code == 201
-    assert station.upload().status_code == 201
-    assert checked == [600.0, 5.0]
-    assert station.desk.config.max_upload_mb == 2
-    assert station.desk.get(voice(station)["tracks"][0]["break_id"]).limit_s == 600.0
-
-
-@pytest.mark.parametrize(("length", "accepted"), [(599.99, True), (600.01, False)])
-def test_manual_upload_decoder_enforces_the_synthetic_ten_minute_boundary(
-    tmp_path, monkeypatch, length, accepted
-):
-    """Exercise just below and above the installed cap without a ten-minute decode."""
-    import numpy as np
-
-    from autodj import break_audio, breaks_api
-    from autodj.breaks import BreakCues
-    from autodj.stereo import TrackTooLongError
-
-    station = Station(tmp_path)
-    station.player.voice_track_crosses_hard_boundary = lambda _at, _duration: False
-    limits = []
-
-    def decode(_path, max_seconds):
-        limits.append(max_seconds)
-        if length > max_seconds:
-            raise TrackTooLongError("synthetic voice track", length)
-        return np.zeros((2, 2), dtype=np.float32)
-
-    monkeypatch.setattr(break_audio, "decode_break", decode)
-    monkeypatch.setattr(breaks_api, "speech_cues", lambda _audio: BreakCues(0, 1, 1, length))
-    reply = book(station, body=wav())
-
-    assert limits == [600.0]
-    if accepted:
-        assert reply.status_code == 201, reply.text
-        assert station.desk.get(reply.json()["break_id"]).limit_s == 600.0
-        assert len(files(station.desk)) == 1
-    else:
-        assert reply.status_code == 422
-        assert "at most 600 seconds" in reply.json()["detail"]
-        assert voice(station)["tracks"] == []
-        assert files(station.desk) == []
-
-
-@pytest.mark.parametrize("placement", ["auto", "talk_up", "standalone"])
-def test_hard_boundary_refusal_leaves_no_voice_track_or_file(station, placement):
-    station.player.voice_track_crosses_hard_boundary = lambda _at, _duration: True
-    reply = book(station, placement=placement)
-    assert reply.status_code == 409
-    assert reply.json()["reason"] == "scheduled_boundary"
-    assert voice(station)["tracks"] == []
-    assert files(station.desk) == []
-
-
-def test_hard_boundary_check_fails_closed_when_event_access_raises(station):
-    def unavailable(*_args):
-        raise RuntimeError("scheduler unavailable")
-
-    station.player.voice_track_crosses_hard_boundary = unavailable
-    reply = book(station, placement="talk_up", allow_outro="true")
-    assert reply.status_code == 409
-    assert reply.json()["reason"] == "scheduled_boundary"
-    assert "could not be checked" in reply.json()["detail"]
-    assert files(station.desk) == []
-
-
-def test_context_forecasts_the_whole_queued_voice_chain_and_cue_tails(station):
-    first = book(station, placement="auto").json()
-    first_item = station.desk.get(first["break_id"])
-    context = voice(station)
-    slot = context["slot"]
-    assert slot["queued_chain_speech_s"] == pytest.approx(first_item.cues.speech)
-    assert slot["queued_chain_clip_s"] == pytest.approx(first_item.cues.end - first_item.cues.start)
-    assert slot["queued_chain_clip_s"] > slot["queued_chain_speech_s"]
-
-    second = book(station, placement="auto").json()
-    second_item = station.desk.get(second["break_id"])
-    slot = voice(station)["slot"]
-    assert slot["queued_chain_speech_s"] == pytest.approx(
-        first_item.cues.speech + second_item.cues.speech
-    )
-    assert slot["queued_chain_clip_s"] == pytest.approx(
-        first_item.cues.end - first_item.cues.start + second_item.cues.end - second_item.cues.start
-    )
-
-
 def test_deeply_nested_transition_choices_are_refused_before_storing_audio(station):
     slot = voice(station)["slot"]
     response = book(
@@ -276,11 +173,114 @@ def test_custom_transition_view_includes_later_announcer_breaks_in_render_order(
     ]
 
 
+def test_context_forecasts_the_whole_queued_voice_chain_and_cue_tails(station):
+    first = book(station, placement="auto").json()
+    first_item = station.desk.get(first["break_id"])
+    context = voice(station)
+    slot = context["slot"]
+    assert slot["queued_chain_speech_s"] == pytest.approx(first_item.cues.speech)
+    assert slot["queued_chain_clip_s"] == pytest.approx(first_item.cues.end - first_item.cues.start)
+    assert slot["queued_chain_clip_s"] > slot["queued_chain_speech_s"]
+
+    second = book(station, placement="auto").json()
+    second_item = station.desk.get(second["break_id"])
+    slot = voice(station)["slot"]
+    assert slot["queued_chain_speech_s"] == pytest.approx(
+        first_item.cues.speech + second_item.cues.speech
+    )
+    assert slot["queued_chain_clip_s"] == pytest.approx(
+        first_item.cues.end - first_item.cues.start + second_item.cues.end - second_item.cues.start
+    )
+
+
 def test_manual_fit_ignores_announcer_intro_minimum(tmp_path):
     station = Station(tmp_path, min_intro_seconds=5.0)
     slot = voice(station)["slot"]
     assert slot["auto_placement"] == "talk_up"
     assert slot["auto_note"] is None
+
+
+def test_manual_voice_limits_do_not_change_announcer_limits(tmp_path, monkeypatch):
+    import autodj.breaks_api as api
+    from autodj.server import _voice_upload_cap
+
+    station = Station(tmp_path, max_seconds=5.0, max_upload_mb=2)
+    limits = voice(station)["limits"]
+    assert (limits["max_bytes"], limits["max_seconds"]) == (64 * 1024 * 1024, 600.0)
+    assert _voice_upload_cap(station.app.state.stations) >= 64 * 1024 * 1024
+    checked = []
+
+    async def decode(_gate, _path, max_seconds, _decode=None):
+        checked.append(max_seconds)
+        from autodj.breaks import BreakCues
+
+        return BreakCues(0, 1, 1, 2)
+
+    monkeypatch.setattr(api, "_gated_decode", decode)
+    assert book(station).status_code == 201
+    assert station.upload().status_code == 201
+    assert checked == [600.0, 5.0]
+    assert station.desk.config.max_upload_mb == 2
+    assert station.desk.get(voice(station)["tracks"][0]["break_id"]).limit_s == 600.0
+
+
+@pytest.mark.parametrize(("length", "accepted"), [(599.99, True), (600.01, False)])
+def test_manual_upload_decoder_enforces_the_synthetic_ten_minute_boundary(
+    tmp_path, monkeypatch, length, accepted
+):
+    """Exercise just below and above the installed cap without a ten-minute decode."""
+    import numpy as np
+
+    from autodj import break_audio, breaks_api
+    from autodj.breaks import BreakCues
+    from autodj.stereo import TrackTooLongError
+
+    station = Station(tmp_path)
+    station.player.voice_track_crosses_hard_boundary = lambda _at, _duration: False
+    limits = []
+
+    def decode(_path, max_seconds):
+        limits.append(max_seconds)
+        if length > max_seconds:
+            raise TrackTooLongError("synthetic voice track", length)
+        return np.zeros((2, 2), dtype=np.float32)
+
+    monkeypatch.setattr(break_audio, "decode_break", decode)
+    monkeypatch.setattr(breaks_api, "speech_cues", lambda _audio: BreakCues(0, 1, 1, length))
+    reply = book(station, body=wav())
+
+    assert limits == [600.0]
+    if accepted:
+        assert reply.status_code == 201, reply.text
+        assert station.desk.get(reply.json()["break_id"]).limit_s == 600.0
+        assert len(files(station.desk)) == 1
+    else:
+        assert reply.status_code == 422
+        assert "at most 600 seconds" in reply.json()["detail"]
+        assert voice(station)["tracks"] == []
+        assert files(station.desk) == []
+
+
+@pytest.mark.parametrize("placement", ["auto", "talk_up", "standalone"])
+def test_hard_boundary_refusal_leaves_no_voice_track_or_file(station, placement):
+    station.player.voice_track_crosses_hard_boundary = lambda _at, _duration: True
+    reply = book(station, placement=placement)
+    assert reply.status_code == 409
+    assert reply.json()["reason"] == "scheduled_boundary"
+    assert voice(station)["tracks"] == []
+    assert files(station.desk) == []
+
+
+def test_hard_boundary_check_fails_closed_when_event_access_raises(station):
+    def unavailable(*_args):
+        raise RuntimeError("scheduler unavailable")
+
+    station.player.voice_track_crosses_hard_boundary = unavailable
+    reply = book(station, placement="talk_up", allow_outro="true")
+    assert reply.status_code == 409
+    assert reply.json()["reason"] == "scheduled_boundary"
+    assert "could not be checked" in reply.json()["detail"]
+    assert files(station.desk) == []
 
 
 def test_voice_forecast_uses_playback_rate_for_both_music_windows(station):
